@@ -10,7 +10,6 @@ REDIS_USER="myuser"
 REDIS_PASS="MyRedisPass123"
 
 SHAKE_CONFIG="$(pwd)/shake_sync_env.toml"
-
 SYNC_TIMEOUT=$((60 * 60)) # max wait time for sync (1 hour)
 
 # -------------------------
@@ -106,6 +105,31 @@ run_sync() {
 }
 
 # -------------------------
+# Helper: check keys in all DBs for a given Redis instance
+# -------------------------
+check_all_dbs() {
+  local ADDR="$1"
+  local NAME="$2"
+
+  echo "🔍 Checking all DBs on $NAME ($ADDR)..."
+  local MAX_DB
+  MAX_DB=$(redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@$ADDR" CONFIG GET databases | awk 'NR==2 {print $1}')
+  if [ -z "$MAX_DB" ]; then
+    MAX_DB=16  # fallback to default
+  fi
+
+  for ((db=0; db<MAX_DB; db++)); do
+    COUNT=$(redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@$ADDR" -n $db DBSIZE 2>/dev/null || echo "ERR")
+    if [ "$COUNT" != "ERR" ]; then
+      echo "  DB[$db] → $COUNT keys"
+      if [ "$COUNT" -gt 0 ]; then
+        redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@$ADDR" -n $db KEYS "*" | sed 's/^/    /'
+      fi
+    fi
+  done
+}
+
+# -------------------------
 # Step 0: Verify both Redis instances are running
 # -------------------------
 echo "✅ Checking if Redis instances are running..."
@@ -123,10 +147,10 @@ run_sync "$REDIS1_ADDR" "$REDIS2_ADDR" "redis1 → redis2 (before restart)"
 read -p "⏸️ Press Enter once you have manually restarted redis1 to continue..."
 
 # -------------------------
-# Step 3: Check number of keys on redis1
+# Step 3: Check number of keys on redis1 after restart
 # -------------------------
-echo "ℹ️ After restart, number of keys on redis1 (should be 0):"
-redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@$REDIS1_ADDR" DBSIZE || { echo "❌ Failed to query redis1"; exit 1; }
+echo "ℹ️ After restart, keys on redis1 (all DBs, should be empty):"
+check_all_dbs "$REDIS1_ADDR" "redis1"
 
 # -------------------------
 # Step 4: Fullsync from redis2 -> redis1
@@ -134,12 +158,12 @@ redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@$REDIS1_ADDR" DBSIZE || { echo "�
 run_sync "$REDIS2_ADDR" "$REDIS1_ADDR" "redis2 → redis1 (restore after restart)"
 
 # -------------------------
-# Step 5: Final verification
+# Step 5: Final verification (all DBs)
 # -------------------------
-echo "✅ Final number of keys on redis1:"
-redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@$REDIS1_ADDR" DBSIZE
+echo "✅ Final verification of redis1 (all DBs):"
+check_all_dbs "$REDIS1_ADDR" "redis1"
 
-echo "✅ Final number of keys on redis2:"
-redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@$REDIS2_ADDR" DBSIZE
+echo "✅ Final verification of redis2 (all DBs):"
+check_all_dbs "$REDIS2_ADDR" "redis2"
 
-echo "🎉 Manual restart and recovery POC complete!"
+echo "🎉 complete!"
