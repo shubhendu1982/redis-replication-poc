@@ -37,19 +37,41 @@ docker exec redis1 redis-cli -a "$REDIS_PASS" ACL LIST | grep "$REDIS_USER"
 echo "Verifying ACL setup on redis2:"
 docker exec redis2 redis-cli -a "$REDIS_PASS" ACL LIST | grep "$REDIS_USER"
 
-# Add initial keys ONLY to redis1 using the user credentials
-echo "Adding initial keys to redis1..."
-docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" SET key1 value1_from_redis1
-docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" SET key2 value2_from_redis1
-docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" SET key3 value3_from_redis1
-docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" SET key4 value4_from_redis1
+# Add different keys to different DBs on redis1
+echo "Adding keys to redis1 in multiple DBs..."
 
-# Verify keys
-echo "Initial keys in redis1:"
-docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" KEYS "*"
+# DB 0
+docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" -n 0 SET db0_key1 value_db0_key1
+docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" -n 0 SET db0_key2 value_db0_key2
 
-echo "Initial keys in redis2 (should be empty):"
-docker exec redis2 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" KEYS "*"
+# DB 1
+docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" -n 1 SET db1_key1 value_db1_key1
+docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" -n 1 SET db1_key2 value_db1_key2
+
+# DB 2
+docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" -n 2 SET db2_key1 value_db2_key1
+docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" -n 2 SET db2_key2 value_db2_key2
+
+# Verify keys in each DB
+echo "Keys in redis1 - DB 0:"
+docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" -n 0 KEYS "*"
+
+echo "Keys in redis1 - DB 1:"
+docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" -n 1 KEYS "*"
+
+echo "Keys in redis1 - DB 2:"
+docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" -n 2 KEYS "*"
+
+
+# Verify keys in each DB
+echo "Keys in redis1 - DB 0:"
+docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" -n 0 KEYS "*"
+
+echo "Keys in redis1 - DB 1:"
+docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" -n 1 KEYS "*"
+
+echo "Keys in redis1 - DB 2:"
+docker exec redis1 redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@localhost:6379" -n 2 KEYS "*"
 
 # Verify connectivity with user credentials
 echo "Testing connectivity with user credentials..."
