@@ -4,7 +4,7 @@ set -e
 # -------------------------
 # Configuration
 # -------------------------
-REDIS_ADDR="10.1.2.208:6379"
+REDIS_ADDR="10.1.9.143:6379"
 REDIS_USER=""
 REDIS_PASS="MyRedisPass123"
 
