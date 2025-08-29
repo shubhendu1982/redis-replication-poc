@@ -3,7 +3,7 @@
 # -------------------------
 # Common username and password for both Redis instances
 # -------------------------
-REDIS_USER="myuser"
+REDIS_USER=""
 REDIS_PASS="MyRedisPass123"
 
 # -------------------------

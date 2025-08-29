@@ -6,11 +6,70 @@ set -e
 # -------------------------
 REDIS1_ADDR="127.0.0.1:6379"
 REDIS2_ADDR="127.0.0.1:6380"
-REDIS_USER="myuser"
+REDIS_USER=""           # set correct username if using ACLs
 REDIS_PASS="MyRedisPass123"
+
+# NEW: make source/target type configurable
+SOURCE_TYPE="standalone"   # options: standalone, cluster
+TARGET_TYPE="standalone"   # options: standalone, cluster
 
 SHAKE_CONFIG="$(pwd)/shake_sync_env.toml"
 SYNC_TIMEOUT=$((60 * 60)) # max wait time for sync (1 hour)
+
+# -------------------------
+# Helper: build Redis URI depending on auth
+# -------------------------
+build_uri() {
+  local ADDR="$1"
+  if [ -n "$REDIS_USER" ] && [ -n "$REDIS_PASS" ]; then
+    echo "redis://$REDIS_USER:$REDIS_PASS@$ADDR"
+  elif [ -n "$REDIS_PASS" ]; then
+    echo "redis://:$REDIS_PASS@$ADDR"
+  else
+    echo "redis://$ADDR"
+  fi
+}
+
+# -------------------------
+# Function: detect TLS or plain Redis
+# -------------------------
+detect_tls() {
+  local ADDR="$1"
+  local URI
+  URI=$(build_uri "$ADDR")
+
+  if timeout 2 redis-cli --tls --insecure -u "${URI/redis:/rediss:}" PING >/dev/null 2>&1; then
+    echo "tls"
+    return
+  fi
+
+  if timeout 2 redis-cli -u "$URI" PING >/dev/null 2>&1; then
+    echo "plain"
+    return
+  fi
+
+  echo "❌ Cannot connect to Redis at $ADDR with or without TLS"
+  exit 1
+}
+
+# -------------------------
+# Wrapper for redis-cli with auto TLS
+# -------------------------
+redis_cmd() {
+  local ADDR="$1"
+  local DB="$2"
+  shift 2
+
+  local MODE URI
+  MODE=$(detect_tls "$ADDR")
+  URI=$(build_uri "$ADDR")
+
+  if [ "$MODE" = "tls" ]; then
+    redis-cli --tls --insecure -u "${URI/redis:/rediss:}" -n "$DB" "$@"
+  else
+    redis-cli -u "$URI" -n "$DB" "$@"
+  fi
+}
 
 # -------------------------
 # Function to check if Redis is reachable
@@ -20,7 +79,7 @@ check_redis_running() {
   local NAME="$2"
 
   echo "🔍 Checking $NAME at $ADDR ..."
-  if ! redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@$ADDR" PING >/dev/null 2>&1; then
+  if ! redis_cmd "$ADDR" 0 PING >/dev/null 2>&1; then
     echo "❌ $NAME ($ADDR) is not reachable!"
     exit 1
   fi
@@ -28,71 +87,124 @@ check_redis_running() {
 }
 
 # -------------------------
-# Function to write config for RedisShake
+# Function to write config for RedisShake (full sync)
 # -------------------------
 write_shake_config() {
-  cat > "$SHAKE_CONFIG" <<EOF
+  local SRC_ADDR="$1"
+  local DST_ADDR="$2"
+  local TMP_FILE="$3"
+
+  local SRC_MODE DST_MODE
+  SRC_MODE=$(detect_tls "$SRC_ADDR")
+  DST_MODE=$(detect_tls "$DST_ADDR")
+
+  cat > "$TMP_FILE" <<EOF
 [sync_reader]
+cluster = $( [ "$SOURCE_TYPE" = "cluster" ] && echo true || echo false )
 address = "\${SHAKE_SRC_ADDRESS}"
-username = "\${SHAKE_SRC_USERNAME}"
-password = "\${SHAKE_SRC_PASSWORD}"
-tls = false
+username = "$( [ -n "$REDIS_USER" ] && echo "$REDIS_USER" || echo "" )"
+password = "$( [ -n "$REDIS_PASS" ] && echo "\${SHAKE_SRC_PASSWORD}" || echo "" )"
+tls = $( [ "$SRC_MODE" = "tls" ] && echo true || echo false )
+# ✅ force full sync
+sync_rdb = true
+sync_aof = true
+prefer_replica = false
+try_diskless = false
 
 [redis_writer]
+cluster = $( [ "$TARGET_TYPE" = "cluster" ] && echo true || echo false )
 address = "\${SHAKE_DST_ADDRESS}"
-username = "\${SHAKE_DST_USERNAME}"
-password = "\${SHAKE_DST_PASSWORD}"
-tls = false
+username = "$( [ -n "$REDIS_USER" ] && echo "$REDIS_USER" || echo "" )"
+password = "$( [ -n "$REDIS_PASS" ] && echo "\${SHAKE_DST_PASSWORD}" || echo "" )"
+tls = $( [ "$DST_MODE" = "tls" ] && echo true || echo false )
+off_reply = false
 
 [filter]
+allow_keys = []
+allow_key_prefix = []
+allow_key_suffix = []
+allow_key_regex = []
+block_keys = []
 block_key_prefix = ["temp:", "cache:"]
+block_key_suffix = []
+block_key_regex = []
+allow_db = []
+block_db = []
+allow_command = []
+block_command = []
+allow_command_group = []
+block_command_group = []
+function = ""
 
 [advanced]
 dir = "data"
+log_file = "shake.log"
+log_level = "info"
+log_interval = 5
+log_rotation = true
+log_max_size = 512
+log_max_age = 7
+log_max_backups = 3
+log_compress = true
+rdb_restore_command_behavior = "panic"
+pipeline_count_limit = 1024
+target_redis_max_qps = 300000
+target_redis_client_max_querybuf_len = 1073741824
+target_redis_proto_max_bulk_len = 512000000
+empty_db_before_sync = false
 EOF
 }
 
+
+
+
 # -------------------------
-# Function to run RedisShake and monitor logs until diff=[0]
+# Function to run RedisShake in a separate sync process
 # -------------------------
-run_sync() {
+run_sync_separate() {
   local SRC="$1"
   local DST="$2"
   local DESC="$3"
 
   echo "➡️ Starting sync: $DESC"
-  write_shake_config
 
-  LOGFILE="$(mktemp)"
-  timeout "$SYNC_TIMEOUT" docker run --rm --network host \
+  # Temporary config file
+  local TMP_CONFIG
+  TMP_CONFIG=$(mktemp)
+  write_shake_config "$SRC" "$DST" "$TMP_CONFIG"
+
+  # Temporary log
+  local LOGFILE
+  LOGFILE=$(mktemp)
+
+  # Run RedisShake in background
+  docker run --rm --network host \
       -e SYNC=true \
       -e SHAKE_SRC_ADDRESS="$SRC" \
-      -e SHAKE_SRC_USERNAME="$REDIS_USER" \
-      -e SHAKE_SRC_PASSWORD="$REDIS_PASS" \
       -e SHAKE_DST_ADDRESS="$DST" \
-      -e SHAKE_DST_USERNAME="$REDIS_USER" \
-      -e SHAKE_DST_PASSWORD="$REDIS_PASS" \
-      -v "$SHAKE_CONFIG":/app/shake_sync_env.toml \
+      $( [ -n "$REDIS_PASS" ] && echo "-e SHAKE_SRC_PASSWORD=$REDIS_PASS -e SHAKE_DST_PASSWORD=$REDIS_PASS" ) \
+      -v "$TMP_CONFIG":/app/shake_sync_env.toml \
       ghcr.io/tair-opensource/redisshake:latest \
       sync -conf /app/shake_sync_env.toml \
       2>&1 | tee "$LOGFILE" &
-  PID=$!
+  local PID=$!
 
-  echo "🔍 Monitoring logs for diff=[0] (timeout $SYNC_TIMEOUT sec)..."
+  echo "🔍 Monitoring logs for diff=[0]..."
   SECONDS=0
   while kill -0 $PID >/dev/null 2>&1; do
     if grep -q "diff=\[0\]" "$LOGFILE"; then
       echo "✅ Sync successful (diff=[0])"
       kill $PID >/dev/null 2>&1 || true
       wait $PID 2>/dev/null || true
-      rm -f "$LOGFILE"
+      rm -f "$TMP_CONFIG" "$LOGFILE"
       return 0
     fi
+
     if [ $SECONDS -ge $SYNC_TIMEOUT ]; then
       echo "❌ Timeout reached ($SYNC_TIMEOUT sec) — no diff=[0] detected"
       kill $PID >/dev/null 2>&1 || true
       wait $PID 2>/dev/null || true
-      rm -f "$LOGFILE"
+      rm -f "$TMP_CONFIG" "$LOGFILE"
       exit 1
     fi
     sleep 2
@@ -100,12 +212,12 @@ run_sync() {
 
   echo "❌ Sync process ended without diff=[0]"
   cat "$LOGFILE"
-  rm -f "$LOGFILE"
+  rm -f "$TMP_CONFIG" "$LOGFILE"
   exit 1
 }
 
 # -------------------------
-# Helper: check keys in all DBs for a given Redis instance
+# Helper: check number of keys in all DBs for a given Redis instance
 # -------------------------
 check_all_dbs() {
   local ADDR="$1"
@@ -113,53 +225,45 @@ check_all_dbs() {
 
   echo "🔍 Checking all DBs on $NAME ($ADDR)..."
   local MAX_DB
-  MAX_DB=$(redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@$ADDR" CONFIG GET databases | awk 'NR==2 {print $1}')
+  MAX_DB=$(redis_cmd "$ADDR" 0 CONFIG GET databases 2>/dev/null | awk 'NR==2 {print $1}')
   if [ -z "$MAX_DB" ]; then
-    MAX_DB=16  # fallback to default
+    MAX_DB=16
   fi
 
   for ((db=0; db<MAX_DB; db++)); do
-    COUNT=$(redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@$ADDR" -n $db DBSIZE 2>/dev/null || echo "ERR")
-    if [ "$COUNT" != "ERR" ]; then
+    COUNT=$(redis_cmd "$ADDR" $db DBSIZE 2>/dev/null || echo "AUTH_FAILED")
+    if [ "$COUNT" = "AUTH_FAILED" ]; then
+      echo "  DB[$db] → ❌ Authentication required"
+      continue
+    fi
+    if [[ "$COUNT" =~ ^[0-9]+$ ]]; then
       echo "  DB[$db] → $COUNT keys"
-      if [ "$COUNT" -gt 0 ]; then
-        redis-cli -u "redis://$REDIS_USER:$REDIS_PASS@$ADDR" -n $db KEYS "*" | sed 's/^/    /'
-      fi
+    else
+      echo "  DB[$db] → ❌ Unexpected response: $COUNT"
     fi
   done
 }
 
 # -------------------------
-# Step 0: Verify both Redis instances are running
+# Main flow
 # -------------------------
 echo "✅ Checking if Redis instances are running..."
 check_redis_running "$REDIS1_ADDR" "redis1"
 check_redis_running "$REDIS2_ADDR" "redis2"
 
-# -------------------------
-# Step 1: Fullsync from redis1 -> redis2
-# -------------------------
-run_sync "$REDIS1_ADDR" "$REDIS2_ADDR" "redis1 → redis2 (before restart)"
+run_sync_separate "$REDIS1_ADDR" "$REDIS2_ADDR" "redis1 → redis2 (before restart)"
 
-# -------------------------
-# Step 2: Wait for manual restart of redis1
-# -------------------------
 read -p "⏸️ Press Enter once you have manually restarted redis1 to continue..."
 
-# -------------------------
-# Step 3: Check number of keys on redis1 after restart
-# -------------------------
+SRC_MODE=$(detect_tls "$REDIS1_ADDR")
+DST_MODE=$(detect_tls "$REDIS2_ADDR")
+echo "🔍 TLS status after restart: redis1=$SRC_MODE, redis2=$DST_MODE"
+
 echo "ℹ️ After restart, keys on redis1 (all DBs, should be empty):"
 check_all_dbs "$REDIS1_ADDR" "redis1"
 
-# -------------------------
-# Step 4: Fullsync from redis2 -> redis1
-# -------------------------
-run_sync "$REDIS2_ADDR" "$REDIS1_ADDR" "redis2 → redis1 (restore after restart)"
+run_sync_separate "$REDIS2_ADDR" "$REDIS1_ADDR" "redis2 → redis1 (restore after restart)"
 
-# -------------------------
-# Step 5: Final verification (all DBs)
-# -------------------------
 echo "✅ Final verification of redis1 (all DBs):"
 check_all_dbs "$REDIS1_ADDR" "redis1"
 
