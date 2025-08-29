@@ -9,7 +9,7 @@ REDIS_USER=""
 REDIS_PASS="MyRedisPass123"
 
 # Number of sample keys to create
-SAMPLE_KEYS_COUNT=100
+SAMPLE_KEYS_COUNT=50
 
 # -------------------------
 # Function to execute Redis commands
@@ -38,54 +38,29 @@ check_redis_running() {
         return 0
     else
         echo "❌ Redis is not reachable!"
-        echo "   Please check:"
-        echo "   - Redis is running"
-        echo "   - Password is correct"
-        echo "   - Network connectivity"
         return 1
     fi
 }
 
 # -------------------------
-# Function to add sample data
+# Function to add simple string data
 # -------------------------
-add_sample_data() {
-    echo "📝 Adding sample data to Redis..."
+add_simple_data() {
+    echo "📝 Adding simple string data to Redis..."
     
-    # Database 0: String values
+    # Database 0: Simple string values
     echo "   Adding string values to DB 0..."
     for i in $(seq 1 $SAMPLE_KEYS_COUNT); do
-        redis_cmd 0 SET "key:string:$i" "value_$i_$(date +%s)" >/dev/null
+        redis_cmd 0 SET "key$i" "value$i" >/dev/null
     done
-    echo "   ✅ Added $SAMPLE_KEYS_COUNT string keys"
+    echo "   ✅ Added $SAMPLE_KEYS_COUNT simple string keys"
     
-    # Database 1: Hash values
-    echo "   Adding hash values to DB 1..."
+    # Database 1: Some additional simple data
+    echo "   Adding more simple data to DB 1..."
     for i in $(seq 1 $((SAMPLE_KEYS_COUNT / 2))); do
-        redis_cmd 1 HSET "user:$i" "name" "User$i" "email" "user$i@example.com" "age" "$((20 + i))" >/dev/null
+        redis_cmd 1 SET "data:$i" "sample_value_$i" >/dev/null
     done
-    echo "   ✅ Added $((SAMPLE_KEYS_COUNT / 2)) hash keys"
-    
-    # Database 2: List values
-    echo "   Adding list values to DB 2..."
-    for i in $(seq 1 $((SAMPLE_KEYS_COUNT / 4))); do
-        redis_cmd 2 LPUSH "queue:$i" "item1" "item2" "item3" "item4" "item5" >/dev/null
-    done
-    echo "   ✅ Added $((SAMPLE_KEYS_COUNT / 4)) list keys"
-    
-    # Database 3: Set values
-    echo "   Adding set values to DB 3..."
-    for i in $(seq 1 $((SAMPLE_KEYS_COUNT / 4))); do
-        redis_cmd 3 SADD "tags:$i" "tag1" "tag2" "tag3" "tag4" "tag5" >/dev/null
-    done
-    echo "   ✅ Added $((SAMPLE_KEYS_COUNT / 4)) set keys"
-    
-    # Database 4: Sorted set values
-    echo "   Adding sorted set values to DB 4..."
-    for i in $(seq 1 $((SAMPLE_KEYS_COUNT / 5))); do
-        redis_cmd 4 ZADD "leaderboard:$i" "$((100 + i))" "player$((i * 1))" "$((200 + i))" "player$((i * 2))" "$((300 + i))" "player$((i * 3))" >/dev/null
-    done
-    echo "   ✅ Added $((SAMPLE_KEYS_COUNT / 5)) sorted set keys"
+    echo "   ✅ Added $((SAMPLE_KEYS_COUNT / 2)) more simple keys"
 }
 
 # -------------------------
@@ -96,7 +71,7 @@ show_data_stats() {
     echo "📊 Current Data Statistics:"
     echo "==========================="
     
-    for db in {0..4}; do
+    for db in {0..1}; do
         local count
         count=$(redis_cmd "$db" DBSIZE)
         if [[ "$count" =~ ^[0-9]+$ ]]; then
@@ -110,9 +85,9 @@ show_data_stats() {
     echo ""
     echo "🔍 Sample Keys:"
     echo "---------------"
-    for db in {0..4}; do
+    for db in {0..1}; do
         echo "DB $db sample keys:"
-        redis_cmd "$db" KEYS "*" | head -3 | while read -r key; do
+        redis_cmd "$db" KEYS "*" | head -5 | while read -r key; do
             if [ -n "$key" ]; then
                 echo "  - $key"
             fi
@@ -155,7 +130,7 @@ show_menu() {
     echo "==============================="
     echo "Redis: $REDIS_ADDR"
     echo ""
-    echo "1. Add sample data"
+    echo "1. Add simple data"
     echo "2. Show data statistics"
     echo "3. Flush all data (DANGER!)"
     echo "4. Flush specific database"
@@ -181,7 +156,7 @@ while true; do
     
     case $choice in
         1)
-            add_sample_data
+            add_simple_data
             ;;
         2)
             show_data_stats
@@ -190,8 +165,8 @@ while true; do
             flush_all_data
             ;;
         4)
-            read -p "Enter database number to flush (0-16): " db_num
-            if [[ "$db_num" =~ ^[0-9]+$ ]] && [ "$db_num" -ge 0 ] && [ "$db_num" -le 16 ]; then
+            read -p "Enter database number to flush (0-1): " db_num
+            if [[ "$db_num" =~ ^[0-1]$ ]]; then
                 flush_database "$db_num"
             else
                 echo "❌ Invalid database number"
